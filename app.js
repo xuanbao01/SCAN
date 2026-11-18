@@ -29,12 +29,13 @@
   const setStatus = (t, warn) => { statusEl.textContent = t; statusEl.className = warn ? 'warn' : ''; };
 
   // ---------- 设置 ----------
-  const opt = Object.assign({ limit: 960, sound: true, boxes: true, debug: false }, ls.get('opt', {}));
-  $('optLimit').value = String(opt.limit); $('optSound').checked = opt.sound; $('optBoxes').checked = opt.boxes; $('optDebug').checked = opt.debug;
+  const opt = Object.assign({ limit: 960, sound: true, boxes: true, debug: false, single: false }, ls.get('opt', {}));
+  $('optLimit').value = String(opt.limit); $('optSound').checked = opt.sound; $('optBoxes').checked = opt.boxes; $('optDebug').checked = opt.debug; $('optSingle').checked = opt.single;
   const saveOpt = () => { ls.set('opt', opt); OCR.cfg.detLimit = +opt.limit; };
   $('optLimit').onchange = e => { opt.limit = +e.target.value; saveOpt(); };
   $('optSound').onchange = e => { opt.sound = e.target.checked; saveOpt(); };
   $('optBoxes').onchange = e => { opt.boxes = e.target.checked; saveOpt(); if (!opt.boxes) clearOverlay(); };
+  $('optSingle').onchange = e => { opt.single = e.target.checked; saveOpt(); alert('请完全关闭后重新打开本页面生效'); };
   $('optDebug').onchange = e => { opt.debug = e.target.checked; saveOpt(); dbg.textContent = ''; };
 
   // ---------- 声音 ----------
@@ -196,32 +197,69 @@
   let running = false, busy = false, lastThumb = null, lastOcrThumb = null, stableSince = 0;
   let lastOcrAt = 0, retries = 0, lastShownId = -1, lastRes = null;
 
+  // 画面旋转：0 / 90（顺时针）/ -90（逆时针）。考试手机横屏而 iPhone 竖拍时需要旋转
+  let rot = 0;
+  function drawFrame(r) {
+    const c = frame.getContext('2d');
+    if (r === 0) { frame.width = srcW; frame.height = srcH; c.drawImage(srcEl, 0, 0, srcW, srcH); }
+    else {
+      frame.width = srcH; frame.height = srcW;
+      c.save();
+      if (r === 90) { c.translate(srcH, 0); c.rotate(Math.PI / 2); } else { c.translate(0, srcW); c.rotate(-Math.PI / 2); }
+      c.drawImage(srcEl, 0, 0, srcW, srcH); c.restore();
+    }
+    return [frame.width, frame.height];
+  }
+  // 把旋转后坐标里的框换算回原画面，用于在预览上画框
+  function unrotate(boxes, r) {
+    if (r === 0) return boxes;
+    return boxes.map(b => r === 90
+      ? { ...b, cx: b.cy, cy: srcH - b.cx, ang: b.ang - Math.PI / 2 }
+      : { ...b, cx: srcW - b.cy, cy: b.cx, ang: b.ang + Math.PI / 2 });
+  }
+  async function ocrAt(r) {
+    const [w, h] = drawFrame(r);
+    const o = await OCR.run(frame, w, h);
+    o.rot = r; o.res = Bank.match(o.lines);
+    return o;
+  }
+  const rankOf = res => (!res || !res.best) ? 0 : ({ high: 3, mid: 2, low: 1 }[res.conf]);
+
   async function runOcr(thumb) {
     busy = true;
     lastOcrThumb = thumb; lastOcrAt = performance.now();
+    setStatus('识别中…');
     try {
-      frame.width = srcW; frame.height = srcH;
-      frame.getContext('2d').drawImage(srcEl, 0, 0, srcW, srcH);
-      const r = await OCR.run(frame, srcW, srcH);
-      drawBoxes(r.boxes);
-      const res = Bank.match(r.lines);
-      const ms = Math.round(r.ms.det + r.ms.rec);
-      if (opt.debug) dbg.textContent = `检测 ${Math.round(r.ms.det)}ms 识别 ${Math.round(r.ms.rec)}ms\n` + r.lines.map(l => l.text).join('\n');
+      let r = await ocrAt(rot);
+      // 文字大多是竖的、或者没认出题目 → 试试旋转 90°
+      if (rankOf(r.res) < 3 && (r.vertical > r.horizontal || rankOf(r.res) === 0)) {
+        for (const alt of [0, -90, 90].filter(x => x !== rot)) {
+          const [w, h] = drawFrame(alt);
+          const p = await OCR.run(frame, w, h, { probe: true });
+          if (p.horizontal <= p.vertical) continue;
+          const r2 = await ocrAt(alt);
+          if (rankOf(r2.res) > rankOf(r.res)) { r = r2; rot = alt; }
+          if (rankOf(r.res) === 3) break;
+        }
+      }
+      drawBoxes(unrotate(r.boxes, r.rot));
+      const res = r.res;
+      const ms = Math.round(performance.now() - lastOcrAt);
+      if (opt.debug) dbg.textContent = `耗时 ${ms}ms 旋转 ${r.rot}° 横框${r.horizontal} 竖框${r.vertical}\n` + r.lines.map(l => l.text).join('\n');
       if (!res || !res.best) {
         setStatus(`未识别到题目（${ms}ms）`, true);
-        if (!lastRes) showIdle('没看到题目，调整角度让题目完整出现在画面里');
+        if (!lastRes || !lastRes.best) showIdle('没看到题目：让题目完整出现在画面里，靠近一点、对好焦');
         lastRes = res; return;
       }
-      setStatus(`识别 ${ms}ms`);
-      // 同一屏幕上若结果更差则不覆盖
-      const rank = { high: 3, mid: 2, low: 1 };
-      if (lastRes && lastRes.best && lastRes.best.q.id === res.best.q.id && rank[lastRes.conf] > rank[res.conf] && retries > 0) return;
+      setStatus(`识别 ${ms}ms${r.rot ? ' · 画面已旋转' : ''}`);
+      if (lastRes && lastRes.best && lastRes.best.q.id === res.best.q.id && rankOf(lastRes) > rankOf(res) && retries > 0) return;
       const disp = displayAnswer(res);
       if (res.best.q.id !== lastShownId) { beep(res.conf !== 'low'); lastShownId = res.best.q.id; }
       if (res.conf !== 'low') addRecord(res, disp);
       lastRes = res;
     } catch (e) {
-      console.error(e); setStatus('识别出错：' + e.message, true);
+      console.error(e); setStatus('识别出错：' + (e.message || e), true);
+      showIdle('识别出错：' + (e.message || e) + '。可在设置中打开“兼容模式”后重开');
     } finally { busy = false; }
   }
 
@@ -229,17 +267,20 @@
     if (!running) return;
     try {
       if (srcEl === video) { srcW = video.videoWidth; srcH = video.videoHeight; }
+      const now = performance.now();
+      if (busy && now - lastOcrAt > 20000) setStatus('识别很慢或卡住了，可在设置中打开“兼容模式”', true);
+      if (!srcW) setStatus('等待摄像头画面…', true);
       if (srcW && !busy) {
-        const now = performance.now();
         const th = grabThumb();
         if (diffFrac(th, lastThumb) > 0.015) stableSince = now;
         lastThumb = th;
         const stable = now - stableSince > 200;
         const changed = diffFrac(th, lastOcrThumb) > 0.008;
-        if (stable && changed) { retries = 0; runOcr(th); }
+        // 手持晃动时画面一直不稳定：超过 1.2 秒也照样识别
+        if (changed && (stable || now - lastOcrAt > 1200)) { retries = 0; runOcr(th); }
         else if (stable && lastRes && (!lastRes.best || lastRes.conf !== 'high') && now - lastOcrAt > 1200 && retries < 3) { retries++; runOcr(th); }
       }
-    } catch (e) { console.error(e); }
+    } catch (e) { console.error(e); setStatus('出错：' + e.message, true); }
     setTimeout(tick, 100);
   }
 
@@ -279,7 +320,7 @@
     }
     running = true; $('bStart').textContent = '暂停'; $('bStart').classList.add('on');
     lastOcrThumb = null; lastRes = null; lastShownId = -1;
-    keepAwake(); showIdle('正在识别…'); tick();
+    keepAwake(); showIdle('正在识别…'); setStatus('已开始'); stableSince = performance.now(); tick();
   };
 
   // ---------- 启动 ----------
@@ -302,7 +343,7 @@
     showIdle(hasBank ? '对准考试屏幕后点「开始」' : '第一次使用：点「设置」导入题库文件');
     setStatus('正在加载识别模型（首次约 30MB）…');
     const cores = navigator.hardwareConcurrency || 2;
-    let threads = window.crossOriginIsolated ? Math.min(4, cores) : 1;
+    let threads = (window.crossOriginIsolated && !opt.single) ? Math.min(4, cores) : 1;
     OCR.cfg.detLimit = +opt.limit;
     try {
       await OCR.init({ threads });

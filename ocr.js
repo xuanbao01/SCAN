@@ -154,9 +154,12 @@ const OCR = (() => {
   }
 
   // 主入口：src 为 canvas/image/video，返回按阅读顺序排列的文本行
-  async function run(src, W, H) {
+  async function run(src, W, H, opts = {}) {
     const t0 = performance.now();
     let boxes = await detect(src, W, H);
+    const vertical = boxes.filter(b => b.h > 2 * b.w && b.h > 24).length;
+    const horizontal = boxes.filter(b => b.w > 2 * b.h && b.w > 24).length;
+    if (opts.probe) return { vertical, horizontal };
     boxes = boxes.filter(b => b.h > 6 && b.w > b.h * 0.6);
     const t1 = performance.now();
     const crops = boxes.map(b => cropLine(src, b));
@@ -174,7 +177,7 @@ const OCR = (() => {
       r.items.sort((a, b) => a.cx - b.cx);
       return { text: r.items.map(i => i.text).join(' '), cy: r.cy, h: r.h, x0: Math.min(...r.items.map(i => i.cx - i.w / 2)), conf: r.items.reduce((s, i) => s + i.conf, 0) / r.items.length };
     });
-    return { lines: out, boxes: lines, ms: { det: t1 - t0, rec: performance.now() - t1 } };
+    return { lines: out, boxes: lines, vertical, horizontal, ms: { det: t1 - t0, rec: performance.now() - t1 } };
   }
 
   return { init, run, cfg };

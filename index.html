@@ -98,13 +98,14 @@ html,body{margin:0;height:100%;background:#111;color:#eee;font:16px/1.4 -apple-s
   <div class="body set">
     <div><b>题库</b>：<span id="bankInfo">未导入</span></div>
     <p>支持 .et / .xls / .xlsx 题库文件（就是现在这种模板格式）。题库只保存在本手机里，不会上传。题库更新后重新导入即可，会自动覆盖旧的。</p>
-    <label class="btn" style="justify-content:center">导入题库文件<input id="file" type="file" accept=".et,.xls,.xlsx,.csv,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" style="display:none"></label>
+    <label class="btn" style="justify-content:center">导入题库文件<input id="file" type="file" style="display:none"></label>
     <hr style="border-color:#2a2a2a">
     <label>识别精度
       <select id="optLimit"><option value="960">标准（更快）</option><option value="1280">高（字小/离得远时用）</option></select></label>
     <label><input type="checkbox" id="optSound" checked> 出答案时提示音</label>
     <label><input type="checkbox" id="optBoxes" checked> 在画面上标出识别到的文字</label>
     <label><input type="checkbox" id="optDebug"> 显示识别原文（排查问题用）</label>
+    <label><input type="checkbox" id="optSingle"> 兼容模式（单线程，识别卡住时打开）</label>
     <p id="envInfo"></p>
   </div>
 </div>
