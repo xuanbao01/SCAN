@@ -19,11 +19,12 @@ const OCR = (() => {
           const resp = await fetch(url, { cache: i ? 'reload' : 'default' });
           if (!resp.ok) throw new Error(`${label} 下载失败（HTTP ${resp.status}）`);
           const total = +resp.headers.get('content-length') || 0;
-          if (!resp.body || !resp.body.getReader) return new Uint8Array(await resp.arrayBuffer());
+          // 第一次用流式读取显示进度；重试时改用整体读取，兼容性更好
+          if (i > 0 || !resp.body || !resp.body.getReader) { prog(label, 0, 0); return new Uint8Array(await resp.arrayBuffer()); }
           const rd = resp.body.getReader(), parts = []; let got = 0;
           for (;;) {
             const { done, value } = await rd.read(); if (done) break;
-            parts.push(value); got += value.length; prog(label, got, total);
+            parts.push(value); got += value.length; prog(label, got, got < total ? total : 0);
           }
           const buf = new Uint8Array(got); let o = 0; for (const p of parts) { buf.set(p, o); o += p.length; }
           return buf;

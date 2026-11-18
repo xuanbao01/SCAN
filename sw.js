@@ -1,5 +1,5 @@
 // 离线缓存 + 跨源隔离头（让识别可用多线程）
-const CACHE = 'scanquiz-v5';
+const CACHE = 'scanquiz-v6';
 const ASSETS = [
   './', 'index.html', 'app.js', 'ocr.js', 'bank.js', 'manifest.webmanifest', 'icon-180.png', 'icon-512.png',
   'vendor/ort.wasm.min.js', 'vendor/ort-wasm-simd-threaded.mjs', 'vendor/ort-wasm-simd-threaded.wasm', 'vendor/xlsx.full.min.js',
@@ -16,6 +16,8 @@ self.addEventListener('activate', e => {
 function withHeaders(r) {
   if (!r || r.status === 0 || r.type === 'opaque') return r;
   const h = new Headers(r.headers);
+  // 缓存/转发后的正文已经解压，去掉原来的压缩和长度标记，否则 Safari 会报错
+  h.delete('Content-Length'); h.delete('Content-Encoding'); h.delete('Transfer-Encoding');
   h.set('Cross-Origin-Opener-Policy', 'same-origin');
   h.set('Cross-Origin-Embedder-Policy', 'require-corp');
   h.set('Cross-Origin-Resource-Policy', 'same-origin');
