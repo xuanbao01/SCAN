@@ -326,6 +326,10 @@
   // ---------- 启动 ----------
   let ready = false;
   async function boot() {
+    const inWx = /MicroMessenger/i.test(navigator.userAgent);
+    if (inWx) {
+      showIdle('请不要在微信里打开：点右上角「···」→「在默认浏览器中打开」，用 Safari 打开后再添加到主屏幕');
+    }
     if ('serviceWorker' in navigator && !TEST && (location.protocol === 'https:' || location.hostname === 'localhost')) {
       try {
         await navigator.serviceWorker.register('sw.js');
@@ -340,15 +344,24 @@
       } catch (e) { console.warn('SW 注册失败', e); }
     }
     const hasBank = await loadBank();
-    showIdle(hasBank ? '对准考试屏幕后点「开始」' : '第一次使用：点「设置」导入题库文件');
+    if (!inWx) showIdle(hasBank ? '对准考试屏幕后点「开始」' : '第一次使用：点「设置」导入题库文件');
     setStatus('正在加载识别模型（首次约 30MB）…');
+    const onProgress = (label, got, total) => setStatus(total ? `正在下载${label} ${Math.round(got / total * 100)}%` : (got ? `正在下载${label} ${(got / 1048576).toFixed(1)}MB` : label + '…'));
     const cores = navigator.hardwareConcurrency || 2;
     let threads = (window.crossOriginIsolated && !opt.single) ? Math.min(4, cores) : 1;
     OCR.cfg.detLimit = +opt.limit;
     try {
-      await OCR.init({ threads });
+      await OCR.init({ threads, onProgress });
     } catch (e) {
-      if (threads > 1) { threads = 1; await OCR.init({ threads: 1 }); } else { setStatus('模型加载失败：' + e.message, true); return; }
+      console.error(e);
+      try {
+        if (threads > 1) { threads = 1; await OCR.init({ threads: 1, onProgress }); } else throw e;
+      } catch (e2) {
+        const m = (e2 && e2.message) || String(e2);
+        setStatus('模型加载失败', true);
+        showIdle('模型加载失败：' + m + '。请连 WiFi 后用 Safari 重新打开；仍不行请截图这段文字');
+        return;
+      }
     }
     // 预热：用一张画了文字的图空跑一次，让检测和识别都提前完成首次编译
     setStatus('正在预热识别引擎…');

@@ -1,7 +1,7 @@
 // 轻量 PaddleOCR (PP-OCRv4) 浏览器推理：检测(DB) + 识别(CTC)，不依赖 OpenCV
 /* global ort */
 const OCR = (() => {
-  let detSess = null, recSess = null, keys = null;
+  let detSess = null, recSess = null, keys = null, detBuf = null, recBuf = null;
   const cfg = { detLimit: 960, boxThresh: 0.55, binThresh: 0.3, unclip: 1.6, recBatch: 6 };
 
   async function init(opts = {}) {
@@ -10,15 +10,35 @@ const OCR = (() => {
     const threads = opts.threads || 1;
     ort.env.wasm.numThreads = threads;
     const so = { executionProviders: ['wasm'], graphOptimizationLevel: 'all' };
-    const [d, r, k] = await Promise.all([
-      fetch(opts.det || 'models/det.onnx').then(x => x.arrayBuffer()),
-      fetch(opts.rec || 'models/rec.onnx').then(x => x.arrayBuffer()),
-      fetch(opts.keys || 'models/keys.txt').then(x => x.text()),
-    ]);
+    // 逐个下载，带进度和重试（网络不稳时整体加载更可靠）
+    const prog = opts.onProgress || (() => {});
+    async function get(url, label) {
+      let lastErr;
+      for (let i = 0; i < 3; i++) {
+        try {
+          const resp = await fetch(url, { cache: i ? 'reload' : 'default' });
+          if (!resp.ok) throw new Error(`${label} 下载失败（HTTP ${resp.status}）`);
+          const total = +resp.headers.get('content-length') || 0;
+          if (!resp.body || !resp.body.getReader) return new Uint8Array(await resp.arrayBuffer());
+          const rd = resp.body.getReader(), parts = []; let got = 0;
+          for (;;) {
+            const { done, value } = await rd.read(); if (done) break;
+            parts.push(value); got += value.length; prog(label, got, total);
+          }
+          const buf = new Uint8Array(got); let o = 0; for (const p of parts) { buf.set(p, o); o += p.length; }
+          return buf;
+        } catch (e) { lastErr = e; prog(label + `（第${i + 2}次重试）`, 0, 0); await new Promise(r => setTimeout(r, 800)); }
+      }
+      throw new Error(`${label}：${lastErr && lastErr.message || lastErr}`);
+    }
+    if (!detBuf) detBuf = await get(opts.det || 'models/det.onnx', '检测模型');
+    if (!recBuf) recBuf = await get(opts.rec || 'models/rec.onnx', '识别模型');
+    const k = new TextDecoder().decode(await get(opts.keys || 'models/keys.txt', '字典'));
+    prog('初始化识别引擎', 0, 0);
     keys = k.replace(/\r/g, '').split('\n');
     if (keys[keys.length - 1] === '') keys.pop();
-    detSess = await ort.InferenceSession.create(new Uint8Array(d), so);
-    recSess = await ort.InferenceSession.create(new Uint8Array(r), so);
+    detSess = await ort.InferenceSession.create(detBuf, so);
+    recSess = await ort.InferenceSession.create(recBuf, so);
   }
 
   // ---------- 检测 ----------
