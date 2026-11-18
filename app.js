@@ -350,6 +350,18 @@
     } catch (e) {
       if (threads > 1) { threads = 1; await OCR.init({ threads: 1 }); } else { setStatus('模型加载失败：' + e.message, true); return; }
     }
+    // 预热：用一张画了文字的图空跑一次，让检测和识别都提前完成首次编译
+    setStatus('正在预热识别引擎…');
+    try {
+      const w = document.createElement('canvas'); w.width = 960; w.height = 540;
+      const x = w.getContext('2d');
+      x.fillStyle = '#fff'; x.fillRect(0, 0, 960, 540); x.fillStyle = '#222';
+      x.font = '32px sans-serif';
+      x.fillText('1. 预热测试题干，以下说法正确的是（ ）。', 30, 80);
+      x.fillText('A. 正确选项文字内容', 60, 180);
+      x.fillText('B. 错误选项文字内容 123', 60, 260);
+      await OCR.run(w, 960, 540);
+    } catch (e) { console.warn('预热失败', e); }
     ready = true;
     $('envInfo').textContent = `识别线程：${threads}　离线可用：${'serviceWorker' in navigator ? '是' : '否'}`;
     setStatus(hasBank ? `就绪 · 题库 ${Bank.size()} 题` : '就绪 · 请先导入题库', !hasBank);
