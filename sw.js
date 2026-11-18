@@ -1,5 +1,5 @@
 // 离线缓存 + 跨源隔离头（让识别可用多线程）
-const CACHE = 'scanquiz-v6';
+const CACHE = 'scanquiz-v7';
 const ASSETS = [
   './', 'index.html', 'app.js', 'ocr.js', 'bank.js', 'manifest.webmanifest', 'icon-180.png', 'icon-512.png',
   'vendor/ort.wasm.min.js', 'vendor/ort-wasm-simd-threaded.mjs', 'vendor/ort-wasm-simd-threaded.wasm', 'vendor/xlsx.full.min.js',

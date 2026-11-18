@@ -330,17 +330,26 @@
     if (inWx) {
       showIdle('请不要在微信里打开：点右上角「···」→「在默认浏览器中打开」，用 Safari 打开后再添加到主屏幕');
     }
+    // 崩溃保护：上次加载没走完（页面崩溃自动刷新），这次改用最稳妥的单线程模式
+    const prev = ls.get('loadState', null);
+    let crashes = (prev && prev.stage !== 'done' && Date.now() - prev.t < 10 * 60e3) ? (prev.crashes || 0) + 1 : 0;
+    // iPhone/iPad 上多线程不稳定（会导致页面崩溃反复刷新），一律单线程
+    const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+    const safe = crashes > 0 || opt.single || isIOS;
+    if (crashes > 0) setStatus(`检测到上次加载中断，已切换兼容模式（第 ${crashes} 次）`, true);
+    if (crashes >= 3) {
+      showIdle('这个浏览器无法运行识别引擎。请用 iPhone 自带的 Safari（蓝色指南针图标）打开本网址');
+      ls.set('loadState', { stage: 'gaveup', t: Date.now(), crashes: 0 });
+      return;
+    }
     if ('serviceWorker' in navigator && !TEST && (location.protocol === 'https:' || location.hostname === 'localhost')) {
       try {
         await navigator.serviceWorker.register('sw.js');
-        const reloadOnce = () => {
-          if (!window.crossOriginIsolated && !sessionStorage.getItem('coiReload') && !running) {
-            sessionStorage.setItem('coiReload', '1'); location.reload(); return true;
-          }
-          return false;
-        };
-        if (navigator.serviceWorker.controller) { if (reloadOnce()) return; }
-        else navigator.serviceWorker.addEventListener('controllerchange', reloadOnce, { once: true });
+        // 只在启动最开始、且10分钟内最多刷新一次，避免下载中途刷新或循环刷新
+        const last = ls.get('coiReloadAt', 0);
+        if (!safe && navigator.serviceWorker.controller && !window.crossOriginIsolated && Date.now() - last > 10 * 60e3) {
+          ls.set('coiReloadAt', Date.now()); location.reload(); return;
+        }
       } catch (e) { console.warn('SW 注册失败', e); }
     }
     const hasBank = await loadBank();
@@ -348,7 +357,8 @@
     setStatus('正在加载识别模型（首次约 30MB）…');
     const onProgress = (label, got, total) => setStatus(total ? `正在下载${label} ${Math.round(got / total * 100)}%` : (got ? `正在下载${label} ${(got / 1048576).toFixed(1)}MB` : label + '…'));
     const cores = navigator.hardwareConcurrency || 2;
-    let threads = (window.crossOriginIsolated && !opt.single) ? Math.min(4, cores) : 1;
+    let threads = (window.crossOriginIsolated && !safe) ? Math.min(4, cores) : 1;
+    ls.set('loadState', { stage: 'init', t: Date.now(), crashes, threads });
     OCR.cfg.detLimit = +opt.limit;
     try {
       await OCR.init({ threads, onProgress });
@@ -359,6 +369,7 @@
       } catch (e2) {
         const m = (e2 && e2.message) || String(e2);
         setStatus('模型加载失败', true);
+        ls.set('loadState', { stage: 'done', t: Date.now(), crashes: 0 });
         showIdle('模型加载失败：' + m + '。请连 WiFi 后用 Safari 重新打开；仍不行请截图这段文字');
         return;
       }
@@ -375,8 +386,9 @@
       x.fillText('B. 错误选项文字内容 123', 60, 260);
       await OCR.run(w, 960, 540);
     } catch (e) { console.warn('预热失败', e); }
+    ls.set('loadState', { stage: 'done', t: Date.now(), crashes: 0, threads });
     ready = true;
-    $('envInfo').textContent = `识别线程：${threads}　离线可用：${'serviceWorker' in navigator ? '是' : '否'}`;
+    $('envInfo').textContent = `${safe ? '兼容模式　' : ''}识别线程：${threads}　离线可用：${'serviceWorker' in navigator ? '是' : '否'}`;
     setStatus(hasBank ? `就绪 · 题库 ${Bank.size()} 题` : '就绪 · 请先导入题库', !hasBank);
     if (TEST && hasBank) $('bStart').click();
     if (TEST && params.get('bank')) {
