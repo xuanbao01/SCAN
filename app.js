@@ -354,8 +354,9 @@
     }
     const hasBank = await loadBank();
     if (!inWx) showIdle(hasBank ? '对准考试屏幕后点「开始」' : '第一次使用：点「设置」导入题库文件');
-    setStatus('正在加载识别模型（首次约 30MB）…');
-    const onProgress = (label, got, total) => setStatus(total ? `正在下载${label} ${Math.round(got / total * 100)}%` : (got ? `正在下载${label} ${(got / 1048576).toFixed(1)}MB` : label + '…'));
+    setStatus('正在加载识别模型（仅首次需下载约 30MB）…');
+    try { await navigator.storage?.persist?.(); } catch { /* 忽略 */ }
+    const onProgress = (label, got, total) => setStatus(total ? `正在下载${label} ${Math.round(got / total * 100)}%（${(total / 1048576).toFixed(0)}MB）` : label + '…');
     const cores = navigator.hardwareConcurrency || 2;
     let threads = (window.crossOriginIsolated && !safe) ? Math.min(4, cores) : 1;
     ls.set('loadState', { stage: 'init', t: Date.now(), crashes, threads });
@@ -388,7 +389,7 @@
     } catch (e) { console.warn('预热失败', e); }
     ls.set('loadState', { stage: 'done', t: Date.now(), crashes: 0, threads });
     ready = true;
-    $('envInfo').textContent = `${safe ? '兼容模式　' : ''}识别线程：${threads}　离线可用：${'serviceWorker' in navigator ? '是' : '否'}`;
+    $('envInfo').textContent = `${safe ? '兼容模式　' : ''}识别线程：${threads}　模型来源：${[...new Set(Object.values(OCR.sources))].join('/')}　离线可用：${'serviceWorker' in navigator ? '是' : '否'}`;
     setStatus(hasBank ? `就绪 · 题库 ${Bank.size()} 题` : '就绪 · 请先导入题库', !hasBank);
     if (TEST && hasBank) $('bStart').click();
     if (TEST && params.get('bank')) {

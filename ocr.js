@@ -1,40 +1,86 @@
 // 轻量 PaddleOCR (PP-OCRv4) 浏览器推理：检测(DB) + 识别(CTC)，不依赖 OpenCV
 /* global ort */
 const OCR = (() => {
-  let detSess = null, recSess = null, keys = null, detBuf = null, recBuf = null;
+  let detSess = null, recSess = null, keys = null, detBuf = null, recBuf = null, wasmBuf = null;
   const cfg = { detLimit: 960, boxThresh: 0.55, binThresh: 0.3, unclip: 1.6, recBatch: 6 };
+
+  // 大文件下载源：按顺序尝试，国内镜像优先，github.io 兜底
+  const ORT_VER = '1.31.1', MODEL_VER = '1.4.2';
+  const MIRRORS = [
+    { name: '国内镜像', ort: `https://registry.npmmirror.com/onnxruntime-web/${ORT_VER}/files/dist/`, models: `https://registry.npmmirror.com/@gutenye/ocr-models/${MODEL_VER}/files/assets/` },
+    { name: 'jsDelivr', ort: `https://cdn.jsdelivr.net/npm/onnxruntime-web@${ORT_VER}/dist/`, models: `https://cdn.jsdelivr.net/npm/@gutenye/ocr-models@${MODEL_VER}/assets/` },
+    { name: 'jsDelivr备用', ort: `https://fastly.jsdelivr.net/npm/onnxruntime-web@${ORT_VER}/dist/`, models: `https://fastly.jsdelivr.net/npm/@gutenye/ocr-models@${MODEL_VER}/assets/` },
+  ];
+  const FILES = {
+    wasm: { label: '识别引擎', size: 14848852, kind: 'ort', remote: 'ort-wasm-simd-threaded.wasm', local: 'vendor/ort-wasm-simd-threaded.wasm' },
+    det: { label: '检测模型', size: 4745517, kind: 'models', remote: 'ch_PP-OCRv4_det_infer.onnx', local: 'models/det.onnx' },
+    rec: { label: '识别模型', size: 10822323, kind: 'models', remote: 'ch_PP-OCRv4_rec_infer.onnx', local: 'models/rec.onnx' },
+    keys: { label: '字典', size: 26249, kind: 'models', remote: 'ppocr_keys_v1.txt', local: 'models/keys.txt' },
+  };
+  const MCACHE = 'scanquiz-models-v1';
+  const sources = {};
+
+  async function download(url, f, label, prog) {
+    const ctl = new AbortController();
+    let timer = setTimeout(() => ctl.abort(), 12000);           // 12 秒内没响应就换源
+    try {
+      const resp = await fetch(url, { signal: ctl.signal, mode: 'cors', credentials: 'omit' });
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      const buf = new Uint8Array(f.size); let got = 0;
+      if (resp.body && resp.body.getReader) {
+        const rd = resp.body.getReader();
+        for (;;) {
+          clearTimeout(timer); timer = setTimeout(() => ctl.abort(), 20000);   // 20 秒没进度就换源
+          const { done, value } = await rd.read(); if (done) break;
+          if (got + value.length > f.size) throw new Error('文件大小不符');
+          buf.set(value, got); got += value.length; prog(label, got, f.size);
+        }
+      } else {
+        const all = new Uint8Array(await resp.arrayBuffer());
+        if (all.length > f.size) throw new Error('文件大小不符');
+        buf.set(all); got = all.length;
+      }
+      if (got !== f.size) throw new Error(`文件不完整（${got}/${f.size}）`);
+      return buf;
+    } catch (e) {
+      throw new Error(e.name === 'AbortError' ? '连接超时' : (e.message || String(e)));
+    } finally { clearTimeout(timer); }
+  }
+
+  async function fetchFile(key, prog, localBase) {
+    const f = FILES[key];
+    const ck = new Request(new URL(`__models__/${MODEL_VER}/${f.remote}`, location.href).href);
+    let cache = null;
+    try { cache = await caches.open(MCACHE); const hit = await cache.match(ck); if (hit) { const b = new Uint8Array(await hit.arrayBuffer()); if (b.length === f.size) { sources[key] = '本机缓存'; return b; } } } catch { /* 无缓存 */ }
+    const list = MIRRORS.map(m => ({ name: m.name, url: m[f.kind] + f.remote }));
+    list.push({ name: 'github', url: new URL((localBase || '') + f.local, location.href).href });
+    list.push({ name: 'github重试', url: new URL((localBase || '') + f.local, location.href).href + '?r=' + Date.now() });
+    const errs = [];
+    for (const src of list) {
+      try {
+        prog(`${f.label}（${src.name}）`, 0, f.size);
+        const b = await download(src.url, f, `${f.label}（${src.name}）`, prog);
+        if (key === 'wasm' && !(b[0] === 0 && b[1] === 0x61 && b[2] === 0x73 && b[3] === 0x6d)) throw new Error('文件内容不对');
+        sources[key] = src.name;
+        try { if (cache) await cache.put(ck, new Response(b)); } catch (e) { console.warn('缓存失败', key, e); }
+        return b;
+      } catch (e) { errs.push(`${src.name}:${e.message}`); }
+    }
+    throw new Error(`${f.label}下载失败（${errs.join('；')}）`);
+  }
 
   async function init(opts = {}) {
     Object.assign(cfg, opts.cfg || {});
-    ort.env.wasm.wasmPaths = new URL(opts.wasmPath || 'vendor/', location.href).href;
-    const threads = opts.threads || 1;
-    ort.env.wasm.numThreads = threads;
+    const localBase = opts.localBase || '';
+    ort.env.wasm.wasmPaths = new URL(localBase + 'vendor/', location.href).href;
+    ort.env.wasm.numThreads = opts.threads || 1;
     const so = { executionProviders: ['wasm'], graphOptimizationLevel: 'all' };
-    // 逐个下载，带进度和重试（网络不稳时整体加载更可靠）
     const prog = opts.onProgress || (() => {});
-    async function get(url, label) {
-      let lastErr;
-      for (let i = 0; i < 3; i++) {
-        try {
-          const resp = await fetch(url, { cache: i ? 'reload' : 'default' });
-          if (!resp.ok) throw new Error(`${label} 下载失败（HTTP ${resp.status}）`);
-          const total = +resp.headers.get('content-length') || 0;
-          // 第一次用流式读取显示进度；重试时改用整体读取，兼容性更好
-          if (i > 0 || !resp.body || !resp.body.getReader) { prog(label, 0, 0); return new Uint8Array(await resp.arrayBuffer()); }
-          const rd = resp.body.getReader(), parts = []; let got = 0;
-          for (;;) {
-            const { done, value } = await rd.read(); if (done) break;
-            parts.push(value); got += value.length; prog(label, got, got < total ? total : 0);
-          }
-          const buf = new Uint8Array(got); let o = 0; for (const p of parts) { buf.set(p, o); o += p.length; }
-          return buf;
-        } catch (e) { lastErr = e; prog(label + `（第${i + 2}次重试）`, 0, 0); await new Promise(r => setTimeout(r, 800)); }
-      }
-      throw new Error(`${label}：${lastErr && lastErr.message || lastErr}`);
-    }
-    if (!detBuf) detBuf = await get(opts.det || 'models/det.onnx', '检测模型');
-    if (!recBuf) recBuf = await get(opts.rec || 'models/rec.onnx', '识别模型');
-    const k = new TextDecoder().decode(await get(opts.keys || 'models/keys.txt', '字典'));
+    if (!wasmBuf) wasmBuf = await fetchFile('wasm', prog, localBase);
+    ort.env.wasm.wasmBinary = wasmBuf;
+    if (!detBuf) detBuf = await fetchFile('det', prog, localBase);
+    if (!recBuf) recBuf = await fetchFile('rec', prog, localBase);
+    const k = new TextDecoder().decode(await fetchFile('keys', prog, localBase));
     prog('初始化识别引擎', 0, 0);
     keys = k.replace(/\r/g, '').split('\n');
     if (keys[keys.length - 1] === '') keys.pop();
@@ -201,5 +247,5 @@ const OCR = (() => {
     return { lines: out, boxes: lines, vertical, horizontal, ms: { det: t1 - t0, rec: performance.now() - t1 } };
   }
 
-  return { init, run, cfg };
+  return { init, run, cfg, sources };
 })();
